@@ -1006,7 +1006,7 @@ function buildMsg(m,users,rx,polls){
     body=`<div>${t}</div>`;
   }
   else if(m.type==='image')body=`<img class="msg-img" src="${m.url}" onclick="lightbox(this.src)" style="max-width:100%;"/>`;
-  else if(m.type==='video')body=`<video class="msg-video" controls style="max-width:100%;"><source src="${m.url}"/></video>`;
+  else if(m.type==='video')body=`<div style="background:var(--surface3);border-radius:8px;padding:14px;font-size:12px;color:var(--text3);font-family:'DM Mono',monospace;">📹 Video not supported</div>`;
   else if(m.type==='audio')body=`<audio class="msg-audio" controls style="width:100%;max-width:220px;"><source src="${m.url}"/></audio>`;
   else if(m.type==='voice')body=`<div style="display:flex;align-items:center;gap:8px;font-size:12px;font-family:'DM Mono',monospace;color:var(--text3);">[ Voice note ]</div>`;
   else body=`<div style="display:flex;align-items:center;gap:10px;"><div class="mf-icon" style="font-size:13px;font-family:'DM Mono',monospace;color:var(--text2);">FILE</div><div><div class="mf-name">${esc(m.fileName||'File')}</div><div class="mf-size">${m.fileSize||''}</div></div></div>`;
@@ -1128,19 +1128,55 @@ function toggleAttach(){document.getElementById('attach-menu').classList.toggle(
 function pick(t){document.getElementById('attach-menu').classList.remove('on');const map={image:'fi-image',audio:'fi-audio',doc:'fi-doc',any:'fi-any'};document.getElementById(map[t]||'fi-any').click();}
 function handleFile(e,type){
   const f=e.target.files[0];if(!f)return;
+  // Limit: images 5MB, videos not supported (too large for DB storage)
+  if(f.type.startsWith('video/')){
+    toast('Video files not supported — send images only','er');
+    e.target.value='';return;
+  }
+  const MAX=5*1024*1024; // 5MB
+  if(f.size>MAX){toast('File too large (max 5MB)','er');e.target.value='';return;}
   const reader=new FileReader();
-  reader.onload=ev=>{
-    let mtype=type;if(type==='media')mtype=f.type.startsWith('video')?'video':'image';
+  reader.onload=async ev=>{
+    let mtype=type==='media'?'image':type;
     const m={id:'m'+Date.now(),from:ME.id,type:mtype,url:ev.target.result,fileName:f.name,fileSize:fmtSize(f.size),ts:Date.now()};
-    pushMsg(m);bumpStat('files');toast('Sent!','ok');
-  };reader.readAsDataURL(f);e.target.value='';
+    pushMsg(m);bumpStat('files');toast('Image sent!','ok');
+  };
+  reader.readAsDataURL(f);e.target.value='';
 }
 
-/* ── VOICE ── */
-function toggleVoice(){
-  VOICE=!VOICE;const btn=document.getElementById('voice-btn');
-  if(VOICE){btn.style.color='var(--danger)';btn.style.borderColor='var(--danger)';toast('Recording…','wn');}
-  else{btn.style.color='';btn.style.borderColor='';pushMsg({id:'m'+Date.now(),from:ME.id,type:'voice',ts:Date.now()});toast('Voice note sent','ok');}
+/* ── VOICE RECORDING ── */
+let _mediaRec=null, _audioChunks=[], _recStream=null;
+async function toggleVoice(){
+  const btn=document.getElementById('voice-btn');
+  if(!_mediaRec || _mediaRec.state==='inactive'){
+    // Start recording
+    try{
+      _recStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      _audioChunks=[];
+      _mediaRec=new MediaRecorder(_recStream);
+      _mediaRec.ondataavailable=e=>{if(e.data.size>0)_audioChunks.push(e.data);};
+      _mediaRec.onstop=()=>{
+        const blob=new Blob(_audioChunks,{type:'audio/webm'});
+        const reader=new FileReader();
+        reader.onload=ev=>{
+          pushMsg({id:'m'+Date.now(),from:ME.id,type:'voice',url:ev.target.result,ts:Date.now()});
+          toast('Voice note sent','ok');
+        };
+        reader.readAsDataURL(blob);
+        _recStream.getTracks().forEach(t=>t.stop());
+        _mediaRec=null;_audioChunks=[];_recStream=null;
+        btn.style.color='';btn.style.background='';btn.title='Voice note';
+      };
+      _mediaRec.start();
+      btn.style.color='var(--danger)';btn.style.background='rgba(255,68,68,0.15)';btn.title='Stop & Send';
+      toast('Recording… tap again to send','wn');
+    }catch(e){
+      toast('Microphone access denied','er');
+    }
+  } else {
+    // Stop and send
+    _mediaRec.stop();
+  }
 }
 
 /* ── POLLS ── */
@@ -1439,15 +1475,28 @@ async function removePfp(){
 }
 function handlePfpUpload(e){
   const f=e.target.files[0];if(!f)return;
-  const reader=new FileReader();
-  reader.onload=async ev=>{
-    const dataUrl=ev.target.result;
+  const MAX=2*1024*1024; // 2MB max for profile pics
+  if(f.size>MAX){toast('Image too large — max 2MB','er');e.target.value='';return;}
+  // Compress image before saving
+  const img=new Image();
+  const objectUrl=URL.createObjectURL(f);
+  img.onload=async ()=>{
+    URL.revokeObjectURL(objectUrl);
+    const canvas=document.createElement('canvas');
+    const MAX_DIM=256;
+    let w=img.width,h=img.height;
+    if(w>h){if(w>MAX_DIM){h=Math.round(h*MAX_DIM/w);w=MAX_DIM;}}
+    else{if(h>MAX_DIM){w=Math.round(w*MAX_DIM/h);h=MAX_DIM;}}
+    canvas.width=w;canvas.height=h;
+    canvas.getContext('2d').drawImage(img,0,0,w,h);
+    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
     const users=DB.g('users')||[];const i=users.findIndex(u=>u.id===ME.id);
     if(i<0)return;
     users[i].av=dataUrl;await DB.sa('users',users);ME.av=dataUrl;
     updateMyAvSidebar();closeModal();openMyProfile();renderList();toast('Photo updated!','ok');
   };
-  reader.readAsDataURL(f);e.target.value='';
+  img.src=objectUrl;
+  e.target.value='';
 }
 async function saveBio(){
   const b=document.getElementById('bio-in').value;
