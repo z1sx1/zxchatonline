@@ -4,7 +4,6 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>ZX Chat</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
@@ -552,178 +551,122 @@ input[type=file]{display:none;}
 'use strict';
 
 /* ── DB ── */
-// ── SUPABASE CONFIG ──
-const _SB = supabase.createClient('https://blgaqywzagqiylnuxeaw.supabase.co', 'sb_publishable_3upHZH3rBDAx6XD1tmfgTA_V5IBUgYD', {
-  global: {
-    headers: { 'apikey': 'sb_publishable_3upHZH3rBDAx6XD1tmfgTA_V5IBUgYD' }
-  },
-  realtime: { params: { eventsPerSecond: 10 } }
-});
+// ── SUPABASE REST CONFIG ──
+const _URL = 'https://blgaqywzagqiylnuxeaw.supabase.co/rest/v1';
+const _KEY = 'sb_publishable_3upHZH3rBDAx6XD1tmfgTA_V5IBUgYD';
+const _HDR = {'apikey': _KEY, 'Authorization': 'Bearer ' + _KEY, 'Content-Type': 'application/json', 'Prefer': 'return=minimal'};
 
-// ── LOCAL CACHE (for sync reads during render) + Supabase persistence ──
+// ── LOCAL CACHE ──
 const _cache = {};
 
+// ── DB via direct REST API (no JS client needed) ──
 const DB = {
-  // Sync read from cache (instant, used during render)
-  g(k){ const kk='zx_'+k; return _cache[kk] !== undefined ? _cache[kk] : null; },
-  // Write to cache immediately + async persist to Supabase
+  g(k){ return _cache['zx_'+k] !== undefined ? _cache['zx_'+k] : null; },
   s(k, v){
-    const kk='zx_'+k;
-    _cache[kk] = v;
-    _SB.from('meta').upsert({key: kk, value: v}).catch(e=>console.error('DB.s error:',e));
+    const kk='zx_'+k; _cache[kk]=v;
+    fetch(_URL+'/meta?on_conflict=key', {method:'POST', headers:{..._HDR,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify({key:kk,value:v})}).catch(()=>{});
     return v;
   },
-  // Async version - awaitable save
   async sa(k, v){
-    const kk='zx_'+k;
-    _cache[kk] = v;
-    const {error} = await _SB.from('meta').upsert({key: kk, value: v});
-    if(error) console.error('DB.sa error:',error);
+    const kk='zx_'+k; _cache[kk]=v;
+    try{ await fetch(_URL+'/meta?on_conflict=key', {method:'POST', headers:{..._HDR,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify({key:kk,value:v})});}catch(e){console.error('DB.sa',e);}
     return v;
   },
   d(k){
-    const kk='zx_'+k;
-    delete _cache[kk];
-    _SB.from('meta').delete().eq('key', kk).then(()=>{});
+    const kk='zx_'+k; delete _cache[kk];
+    fetch(_URL+'/meta?key=eq.'+encodeURIComponent(kk), {method:'DELETE', headers:_HDR}).catch(()=>{});
   },
-  // Load all data from Supabase into cache
   async load(){
-    const {data, error} = await _SB.from('meta').select('*');
-    if(error){ console.error('Supabase load error:', error.message || error); return {ok:false, error}; }
-    (data||[]).forEach(row => { _cache[row.key] = row.value; }); // keys already stored with zx_ prefix
-    return {ok:true};
+    try{
+      const r = await fetch(_URL+'/meta?select=key,value', {headers:_HDR});
+      if(!r.ok){
+        const txt = await r.text();
+        return {ok:false, error:{message:'HTTP '+r.status+': '+txt.slice(0,200)}};
+      }
+      const data = await r.json();
+      (data||[]).forEach(row=>{ _cache[row.key]=row.value; });
+      return {ok:true};
+    }catch(e){
+      return {ok:false, error:{message:e.message}};
+    }
   },
-  // Subscribe to realtime changes
   subscribe(){
-    _SB.channel('meta_changes')
-      .on('postgres_changes', {event:'*', schema:'public', table:'meta'}, payload => {
-        if(payload.eventType === 'DELETE'){
-          delete _cache[payload.old.key];
-        } else if(payload.new && payload.new.key){
-          _cache[payload.new.key] = payload.new.value;
-        }
-        // Re-render relevant parts
-        if(typeof renderList === 'function') renderList();
-        if(typeof renderMsgs === 'function' && typeof CHAT !== 'undefined' && CHAT) renderMsgs();
-        if(typeof updateReqBadge === 'function' && typeof ME !== 'undefined' && ME) updateReqBadge();
-      })
-      .subscribe();
+    // Poll every 4s for real-time feel without websocket complexity
+    setInterval(async ()=>{
+      if(!window.ME) return;
+      await DB.load();
+      if(typeof renderList==='function' && !document.getElementById('sb-q')?.value) renderList();
+      if(typeof CHAT!=='undefined' && CHAT && typeof renderMsgs==='function'){ renderMsgs(); if(typeof renderTypingIndicator==='function') renderTypingIndicator(); }
+      if(typeof updateReqBadge==='function') updateReqBadge();
+    }, 4000);
   }
 };
 
-/* ── PFP GALLERY OPTIONS ── */
-const PFP_EMOJIS=['😊','😎','🦊','🐱','🐶','🐼','🦁','🐸','🐺','🦋','🌙','⚡','🔥','🌊','🎯','🎮','👾','🤖','🎸','🌸','🍀','💎'];
-
-/* ── INIT DATA ── */
-// ── BOOT LOADER: Load from Supabase then init ──
+// ── BOOT LOADER ──
 async function _initApp(){
-  // Show loading state
-  const authEl = document.getElementById('auth');
-  if(authEl){
-    const loader = document.createElement('div');
-    loader.id = 'sb-loader';
-    loader.style.cssText = 'position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:12px;';
-    loader.innerHTML = '<div style="font-family:\'Bebas Neue\',sans-serif;font-size:36px;letter-spacing:6px;">ZXCHAT</div><div id="sb-status" style="font-family:\'DM Mono\',monospace;font-size:11px;color:var(--text3);letter-spacing:3px;">CONNECTING...</div>';
-    document.body.appendChild(loader);
-  }
+  // Show loader
+  const loader = document.createElement('div');
+  loader.id = 'sb-loader';
+  loader.style.cssText = 'position:fixed;inset:0;background:#000;display:flex;align-items:center;justify-content:center;z-index:9999;flex-direction:column;gap:12px;';
+  loader.innerHTML = '<div style="font-family:\'Bebas Neue\',sans-serif;font-size:36px;letter-spacing:6px;color:#fff;">ZXCHAT</div><div id="sb-status" style="font-family:\'DM Mono\',monospace;font-size:10px;color:#555;letter-spacing:3px;">CONNECTING...</div>';
+  document.body.appendChild(loader);
 
-  // Test Supabase connection step by step
-  const stEl = document.getElementById('sb-status');
-  if(stEl) stEl.textContent = 'REACHING SUPABASE...';
-  
-  // Step 1: Test basic connectivity
-  try {
-    const ping = await _SB.from('meta').select('count', {count:'exact',head:true});
-    if(ping.error){
-      if(stEl) stEl.style.color='#ff6b6b';
-      if(ping.error.message && ping.error.message.includes('does not exist')){
-        if(stEl) stEl.innerHTML = '❌ TABLE MISSING — Run SQL in Supabase:<br><br><span style="font-size:9px;background:#111;padding:8px;border-radius:4px;display:block;text-align:left;line-height:2;">create table if not exists meta (key text primary key, value jsonb);<br>alter table meta enable row level security;<br>create policy "p" on meta for all using (true) with check (true);</span>';
-      } else {
-        if(stEl) stEl.textContent = '❌ ' + (ping.error.message || JSON.stringify(ping.error));
-      }
-      return;
-    }
-    if(stEl) stEl.textContent = 'TABLE OK — LOADING DATA...';
-  } catch(e) {
-    if(stEl){ stEl.style.color='#ff6b6b'; stEl.textContent = '❌ NETWORK ERROR: ' + e.message; }
-    return;
-  }
-  
-  // Load all data from Supabase into local cache
-  const result = await DB.load();
-  const error = result && !result.ok ? result.error : null;
-  if(!result || !result.ok){
-    const loader = document.getElementById('sb-loader');
-    if(loader) loader.innerHTML = `
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:6px;">ZXCHAT</div>
-      <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--danger);letter-spacing:2px;margin-bottom:20px;">CONNECTION FAILED</div>
-      <div style="font-family:'DM Mono',monospace;font-size:10px;color:var(--text3);letter-spacing:1px;text-align:center;max-width:280px;line-height:1.8;">
-        This app must be opened from a web server.<br><br>
-        Host it on <b style="color:var(--text)">GitHub Pages</b> or any web host.<br>
-        Local files (content://, file://) cannot connect to Supabase.
-      </div>
-      <div style="margin-top:20px;font-family:'DM Mono',monospace;font-size:9px;color:var(--text3);letter-spacing:1px;">Error: ${error ? (error.message || JSON.stringify(error)) : 'Network blocked — open from a web server'}</div>`;
-    return;
-  }
-
-  // Remove loader
-  const loader = document.getElementById('sb-loader');
-  if(loader) loader.remove();
-
-  // ── Schema version tracking (no destructive wipe) ──
-  const SCHEMA_VER = 'v5_supabase';
-  localStorage.setItem('zx_schema', SCHEMA_VER);
-
-  // ── Seed admin account ──
-  let users = DB.g('users') || [];
-  const adminAccount = {
-    id: 'u0', username: 'zayyan', name: 'Zayyan', pass: '2011',
-    role: 'admin', av: null, avColor: '#1a1f3a', avInitial: 'Z',
-    online: false, joined: '2024-01-01', banned: false, bio: 'Admin of ZX Chat'
+  const setStatus = (msg, color='#555') => {
+    const el = document.getElementById('sb-status');
+    if(el){ el.textContent=msg; el.style.color=color; }
   };
-  const adminIdx = users.findIndex(u => u.username === 'zayyan');
-  if(adminIdx === -1){
-    users.unshift(adminAccount);
-  } else {
-    users[adminIdx].pass = '2011';
-    users[adminIdx].role = 'admin';
-    users[adminIdx].id = 'u0';
-    if(!users[adminIdx].avInitial) users[adminIdx].avInitial = 'Z';
-    if(!users[adminIdx].avColor) users[adminIdx].avColor = '#1a1f3a';
-  }
-  DB.s('users', users);
 
-  // ── Seed ZX General group ──
-  if(!DB.g('groups')){
-    DB.s('groups', [{id:'g0',name:'ZX General',icon:'',desc:'Welcome to ZX Chat!',members:['u0'],admins:['u0'],created:'2024-01-01'}]);
-  } else {
-    const groups = DB.g('groups');
-    const gen = groups.find(g => g.id === 'g0');
-    if(!gen){
-      groups.push({id:'g0',name:'ZX General',icon:'',desc:'Welcome to ZX Chat!',members:['u0'],admins:['u0'],created:'2024-01-01'});
-      DB.s('groups', groups);
-    } else if(!gen.members.includes('u0')){
-      gen.members.push('u0');
-      DB.s('groups', groups);
-    }
-  }
-  if(!DB.g('msgs'))      DB.s('msgs',      {g0:[{id:'m0',from:'sys',type:'sys',text:'Welcome to ZX Chat!',ts:Date.now()}]});
-  if(!DB.g('dms'))       DB.s('dms',       {});
-  if(!DB.g('zx_reactions')) DB.s('reactions', {});
-  if(!DB.g('zx_requests'))  DB.s('requests',  []);
-  if(!DB.g('zx_blocked'))   DB.s('blocked',   []);
-  if(!DB.g('zx_pinned'))    DB.s('pinned',    {});
-  if(!DB.g('zx_starred'))   DB.s('starred',   []);
-  if(!DB.g('zx_muted'))     DB.s('muted',     []);
-  if(!DB.g('zx_polls'))     DB.s('polls',     {});
-  if(!DB.g('zx_log'))       DB.s('log',       [{ts:Date.now(),a:'SYSTEM',d:'ZX Chat initialized'}]);
-  if(!DB.g('zx_stats'))     DB.s('stats',     {msgs:0,files:0});
-  if(!DB.g('settings'))  DB.s('settings',  {reg:true,maint:false,status:'All systems operational'});
+  // Test connection
+  setStatus('TESTING CONNECTION...');
+  const result = await DB.load();
 
-  // ── Final reload to ensure cache is fully fresh before showing login ──
+  if(!result.ok){
+    const msg = result.error ? result.error.message : 'Unknown error';
+    loader.innerHTML = `
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;letter-spacing:6px;color:#fff;">ZXCHAT</div>
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:#ff4444;letter-spacing:2px;margin-bottom:12px;">CONNECTION FAILED</div>
+      <div style="font-family:'DM Mono',monospace;font-size:9px;color:#666;max-width:300px;text-align:center;line-height:1.8;">${msg}</div>
+      <button onclick="_initApp()" style="margin-top:20px;background:#fff;color:#000;border:none;padding:10px 24px;border-radius:8px;font-family:'DM Mono',monospace;font-size:11px;cursor:pointer;letter-spacing:1px;">RETRY</button>`;
+    return;
+  }
+
+  setStatus('SETTING UP...');
+
+  // Seed admin
+  let users = DB.g('users') || [];
+  const adminExists = users.find(u => u.username === 'zayyan');
+  if(!adminExists){
+    users.unshift({id:'u0',username:'zayyan',name:'Zayyan',pass:'2011',role:'admin',av:null,avColor:'#1a1f3a',avInitial:'Z',online:false,joined:'2024-01-01',banned:false,bio:'Admin of ZX Chat'});
+    await DB.sa('users', users);
+  } else {
+    // Ensure correct password and role
+    const idx = users.findIndex(u=>u.username==='zayyan');
+    users[idx].pass='2011'; users[idx].role='admin';
+    await DB.sa('users', users);
+  }
+
+  if(!DB.g('groups')) await DB.sa('groups', [{id:'g0',name:'ZX General',icon:'',desc:'Welcome!',members:['u0'],admins:['u0'],created:'2024-01-01'}]);
+  if(!DB.g('msgs'))      await DB.sa('msgs',      {g0:[{id:'m0',from:'sys',type:'sys',text:'Welcome to ZX Chat!',ts:Date.now()}]});
+  if(!DB.g('dms'))       await DB.sa('dms',       {});
+  if(!DB.g('reactions')) await DB.sa('reactions', {});
+  if(!DB.g('requests'))  await DB.sa('requests',  []);
+  if(!DB.g('blocked'))   await DB.sa('blocked',   []);
+  if(!DB.g('pinned'))    await DB.sa('pinned',    {});
+  if(!DB.g('starred'))   await DB.sa('starred',   []);
+  if(!DB.g('muted'))     await DB.sa('muted',     []);
+  if(!DB.g('polls'))     await DB.sa('polls',     {});
+  if(!DB.g('log'))       await DB.sa('log',       [{ts:Date.now(),a:'SYSTEM',d:'ZX Chat initialized'}]);
+  if(!DB.g('stats'))     await DB.sa('stats',     {msgs:0,files:0});
+  if(!DB.g('settings'))  await DB.sa('settings',  {reg:true,maint:false,status:'All systems operational'});
+  if(!DB.g('typing'))    await DB.sa('typing',    {});
+
+  // Final reload
   await DB.load();
 
-  // ── Subscribe to realtime changes ──
+  // Remove loader
+  loader.remove();
+
+  // Start polling for live updates
   DB.subscribe();
 }
 
