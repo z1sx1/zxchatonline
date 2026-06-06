@@ -1420,6 +1420,8 @@ function deleteUserFromChat(uid){
 }
 
 /* ── MY PROFILE ── */
+const PFP_EMOJIS=['😊','😎','🥳','🤩','😍','🧑','👦','👧','🧔','👩','🦸','🦹','🐱','🐶','🦊','🐼','🐨','🦁','🐯','🐸','🌟','🔥','💎','🎮','🎵','🚀','👑','💜','🩵','🖤'];
+
 function openMyProfile(){
   document.getElementById('rp').classList.add('on');
   document.getElementById('rp-title').textContent='My Profile';
@@ -1452,57 +1454,85 @@ function openMyProfile(){
 /* ── PFP PICKER (GALLERY) ── */
 function openPfpPicker(){
   const galleryHTML=`
-    <div style="font-size:11px;color:var(--text3);margin-bottom:12px;">Choose an avatar from the gallery or upload your own photo.</div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:14px;">Pick an emoji avatar or upload a photo.</div>
     <div class="pfp-gallery" id="pfp-gallery">
       ${PFP_EMOJIS.map(e=>`<div class="pfp-option${ME.av===e?' selected':''}" onclick="selectPfpEmoji('${e}')" title="${e}">${e}</div>`).join('')}
-      <div class="pfp-upload-btn" onclick="document.getElementById('pfp-file').click()" title="Upload photo"><svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></div>
     </div>
-    <div style="margin-top:14px;text-align:center;font-size:11px;color:var(--text3);">Current: ${ME.av&&!ME.av.startsWith('data:')?ME.av:(ME.av?'Custom photo':'Initials')}</div>
-    <div style="margin-top:10px;display:flex;justify-content:center;">
-      <button class="rp-btn red" style="width:auto;padding:8px 14px;margin-top:8px;" onclick="removePfp()"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg> Remove Photo</button>
-    </div>`;
+    <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;">
+      <label style="flex:1;min-width:120px;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:10px;text-align:center;cursor:pointer;font-size:12px;font-family:'DM Mono',monospace;color:var(--text2);letter-spacing:1px;display:flex;align-items:center;justify-content:center;gap:6px;">
+        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        UPLOAD PHOTO
+        <input type="file" accept="image/*" onchange="handlePfpUpload(event)" style="display:none;"/>
+      </label>
+      ${ME.av?`<button onclick="removePfp()" style="flex:1;min-width:120px;background:transparent;border:1px solid var(--danger);border-radius:8px;padding:10px;color:var(--danger);font-size:12px;font-family:'DM Mono',monospace;cursor:pointer;letter-spacing:1px;">REMOVE</button>`:''}
+    </div>
+    <div style="margin-top:10px;text-align:center;font-size:10px;color:var(--text3);font-family:'DM Mono',monospace;">Max 2MB · JPEG/PNG</div>`;
   openModal('Change Profile Picture',galleryHTML,[]);
 }
 async function selectPfpEmoji(emoji){
-  const users=DB.g('users')||[];const i=users.findIndex(u=>u.id===ME.id);if(i<0)return;
-  users[i].av=emoji;await DB.sa('users',users);ME.av=emoji;
+  const users=DB.g('users')||[];
+  const i=users.findIndex(u=>u.id===ME.id);if(i<0)return;
+  users[i]={...users[i], av:emoji};
+  await DB.sa('users',users);
+  ME={...ME, av:emoji};
   updateMyAvSidebar();closeModal();openMyProfile();renderList();toast('Avatar updated!','ok');
 }
 async function removePfp(){
-  const users=DB.g('users')||[];const i=users.findIndex(u=>u.id===ME.id);if(i<0)return;
-  users[i].av=null;await DB.sa('users',users);ME.av=null;
+  const users=DB.g('users')||[];
+  const i=users.findIndex(u=>u.id===ME.id);if(i<0)return;
+  users[i]={...users[i], av:null};
+  await DB.sa('users',users);
+  ME={...ME, av:null};
   updateMyAvSidebar();closeModal();openMyProfile();renderList();toast('Avatar removed','ok');
 }
 function handlePfpUpload(e){
   const f=e.target.files[0];if(!f)return;
-  const MAX=2*1024*1024; // 2MB max for profile pics
+  const MAX=2*1024*1024;
   if(f.size>MAX){toast('Image too large — max 2MB','er');e.target.value='';return;}
-  // Compress image before saving
   const img=new Image();
   const objectUrl=URL.createObjectURL(f);
   img.onload=async ()=>{
     URL.revokeObjectURL(objectUrl);
+    // Compress to 200x200 JPEG at 65% quality — keeps it well under Supabase limits
     const canvas=document.createElement('canvas');
-    const MAX_DIM=256;
+    const MAX_DIM=200;
     let w=img.width,h=img.height;
     if(w>h){if(w>MAX_DIM){h=Math.round(h*MAX_DIM/w);w=MAX_DIM;}}
     else{if(h>MAX_DIM){w=Math.round(w*MAX_DIM/h);h=MAX_DIM;}}
     canvas.width=w;canvas.height=h;
     canvas.getContext('2d').drawImage(img,0,0,w,h);
-    const dataUrl=canvas.toDataURL('image/jpeg',0.7);
-    const users=DB.g('users')||[];const i=users.findIndex(u=>u.id===ME.id);
-    if(i<0)return;
-    users[i].av=dataUrl;await DB.sa('users',users);ME.av=dataUrl;
-    updateMyAvSidebar();closeModal();openMyProfile();renderList();toast('Photo updated!','ok');
+    const dataUrl=canvas.toDataURL('image/jpeg',0.65);
+    // Save — preserve ALL existing user data, only update av field
+    const users=DB.g('users')||[];
+    const i=users.findIndex(u=>u.id===ME.id);
+    if(i<0){toast('User not found','er');return;}
+    const updatedUser={...users[i], av:dataUrl};
+    users[i]=updatedUser;
+    const saved=await DB.sa('users',users);
+    if(saved){
+      ME={...ME, av:dataUrl};
+      updateMyAvSidebar();
+      closeModal();
+      openMyProfile();
+      renderList();
+      toast('Profile photo updated!','ok');
+    } else {
+      toast('Save failed — try again','er');
+    }
   };
+  img.onerror=()=>{ URL.revokeObjectURL(objectUrl); toast('Could not read image','er'); };
   img.src=objectUrl;
   e.target.value='';
 }
 async function saveBio(){
   const b=document.getElementById('bio-in').value;
-  const users=DB.g('users')||[];const i=users.findIndex(u=>u.id===ME.id);
+  const users=DB.g('users')||[];
+  const i=users.findIndex(u=>u.id===ME.id);
   if(i<0)return;
-  users[i].bio=b;await DB.sa('users',users);ME.bio=b;toast('Bio saved!','ok');
+  users[i]={...users[i], bio:b};
+  await DB.sa('users',users);
+  ME={...ME, bio:b};
+  toast('Bio saved!','ok');
 }
 function changePass(){
   openModal('Change Password',
